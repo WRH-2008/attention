@@ -43,7 +43,7 @@ Attention 是本地优先应用，README 承诺核心功能无需账号与网络
 ## 影响
 
 - `settings.gradle.kts` 新增 `:agent`；CI 的 `test` 任务自动覆盖新模块。
-- GLOSSARY 新增助手词条。
+- 「助手」词条进入 CONTEXT.md 领域语言；请求、推理-行动循环、工具等子词汇留在 GLOSSARY。
 - 下一阶段（模型绑定）需要：网络栈选型、密钥管理、隐私声明与 README 修订、变更类工具与确认机制、trace 的持久化决策。
 
 ## 参考
