@@ -1,6 +1,7 @@
 plugins {
     alias(libs.plugins.kotlin.jvm)
     alias(libs.plugins.kotlin.serialization)
+    alias(libs.plugins.kover)
 }
 
 kotlin {
@@ -19,4 +20,15 @@ dependencies {
     api(libs.kotlinx.serialization.json)
     testImplementation(libs.junit)
     testImplementation(libs.coroutines.test)
+}
+
+// Spec #222 的验收口径落到构建上：行覆盖率不足 80% 时 koverVerify 直接失败
+kover {
+    reports {
+        verify {
+            rule {
+                minBound(80)
+            }
+        }
+    }
 }
