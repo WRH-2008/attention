@@ -27,6 +27,7 @@ import androidx.compose.ui.test.onRoot
 import androidx.compose.ui.test.percentOffset
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollTo
+import androidx.compose.ui.test.performScrollToIndex
 import androidx.compose.ui.test.performSemanticsAction
 import androidx.compose.ui.test.performTextReplacement
 import androidx.compose.ui.test.performTouchInput
@@ -379,8 +380,8 @@ class AgendaScreenTest {
         // 面板的内容列是可滚动的，展开「更多设置」之后次要字段会落在面板可视高度以下：
         // 先在面板里滚到目标再断言「已显示」，断言本身仍然是「看得见」，不是「存在」。
         composeRule.onNodeWithTag("agenda-title-input", useUnmergedTree = true).performScrollTo().assertIsDisplayed()
-        composeRule.onNodeWithTag("agenda-start-input", useUnmergedTree = true).performScrollTo().assertIsDisplayed()
-        composeRule.onNodeWithTag("agenda-end-input", useUnmergedTree = true).performScrollTo().assertIsDisplayed()
+        composeRule.onNodeWithTag("agenda-start-time", useUnmergedTree = true).performScrollTo().assertIsDisplayed()
+        composeRule.onNodeWithTag("agenda-end-time", useUnmergedTree = true).performScrollTo().assertIsDisplayed()
         composeRule.onNodeWithTag("agenda-estimate-input", useUnmergedTree = true).performScrollTo().assertIsDisplayed()
         composeRule.onAllNodesWithTag("agenda-reminder-input", useUnmergedTree = true).fetchSemanticsNodes().let {
             assertEquals("更多设置没展开时不渲染次要字段", emptyList<Any>(), it)
@@ -391,6 +392,130 @@ class AgendaScreenTest {
         composeRule.onNodeWithTag("agenda-reminder-input", useUnmergedTree = true).performScrollTo().assertIsDisplayed()
         composeRule.onNodeWithTag("agenda-note-input", useUnmergedTree = true).performScrollTo().assertIsDisplayed()
         composeRule.onNodeWithTag("agenda-add-target", useUnmergedTree = true).performScrollTo().assertIsDisplayed()
+    }
+
+    @Test
+    fun the_time_entry_opens_a_wheel_instead_of_a_text_field() {
+        // 时间不再手填：面板里没有时间输入框，入口点开的是小时/分钟滚轮。
+        mount(allDatesScreenState())
+        openAddScheduleSheet()
+
+        composeRule.onAllNodesWithTag("agenda-start-input", useUnmergedTree = true).assertCountEquals(0)
+        composeRule.onAllNodesWithTag("agenda-end-input", useUnmergedTree = true).assertCountEquals(0)
+
+        composeRule.onNodeWithTag("agenda-start-time", useUnmergedTree = true)
+            .performScrollTo()
+            .performSemanticsAction(SemanticsActions.OnClick)
+        composeRule.waitForIdle()
+
+        composeRule.onNodeWithTag("agenda-time-wheel-dialog", useUnmergedTree = true).assertIsDisplayed()
+        // 默认停在 09:00；把小时列拨到 10 再确定。
+        composeRule.onNodeWithTag("agenda-time-wheel-hours", useUnmergedTree = true).performScrollToIndex(10)
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag("agenda-time-wheel-confirm", useUnmergedTree = true)
+            .performSemanticsAction(SemanticsActions.OnClick)
+        composeRule.waitForIdle()
+
+        composeRule.onNodeWithTag("agenda-start-time", useUnmergedTree = true)
+            .assert(hasAnyDescendant(hasText("10:00")))
+    }
+
+    @Test
+    fun a_time_chosen_with_the_wheel_is_submitted_with_the_draft() {
+        // 滚轮选出的开始/结束时间仍走同一份草稿与校验，不引入新的状态字段。
+        val intents = RecordingAgendaActions()
+        mount(allDatesScreenState(), intents)
+        openAddScheduleSheet()
+
+        composeRule.onNodeWithTag("agenda-title-input", useUnmergedTree = true).performScrollTo()
+            .performTextReplacement("滚轮时间")
+        composeRule.onNodeWithTag("agenda-start-time", useUnmergedTree = true).performScrollTo()
+            .performSemanticsAction(SemanticsActions.OnClick)
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag("agenda-time-wheel-hours", useUnmergedTree = true).performScrollToIndex(10)
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag("agenda-time-wheel-confirm", useUnmergedTree = true)
+            .performSemanticsAction(SemanticsActions.OnClick)
+        composeRule.waitForIdle()
+
+        composeRule.onNodeWithTag("agenda-end-time", useUnmergedTree = true).performScrollTo()
+            .performSemanticsAction(SemanticsActions.OnClick)
+        composeRule.waitForIdle()
+        // 结束时间默认跟着开始时间推后 30 分钟，直接确定即可。
+        composeRule.onNodeWithTag("agenda-time-wheel-confirm", useUnmergedTree = true)
+            .performSemanticsAction(SemanticsActions.OnClick)
+        composeRule.waitForIdle()
+
+        submitAddSchedule()
+
+        val draft = intents.addedSchedules.single()
+        assertEquals(10 * 60, draft.startMinute)
+        assertEquals(10 * 60 + 30, draft.endMinute)
+        // 没填计划投入时留空，领域按完整时间段回退。
+        assertNull(draft.estimatedMinutes)
+    }
+
+    @Test
+    fun the_planned_investment_stays_editable_when_a_time_range_is_set() {
+        // 时间段和计划投入是两个独立字段：设了时段，计划投入仍然可以填。
+        mount(allDatesScreenState())
+        openAddScheduleSheet()
+
+        chooseTimeWithWheel("agenda-start-time", hour = 10, minute = 0)
+        chooseTimeWithWheel("agenda-end-time", hour = 11, minute = 0)
+
+        composeRule.onNodeWithTag("agenda-estimate-input", useUnmergedTree = true)
+            .performScrollTo()
+            .assertIsDisplayed()
+        composeRule.onNodeWithTag("agenda-estimate-preset-30", useUnmergedTree = true)
+            .assertIsDisplayed()
+        composeRule.onNodeWithTag("agenda-estimate-hint", useUnmergedTree = true)
+            .performScrollTo()
+            .assertIsDisplayed()
+            .assert(hasText("留空时按时间段长度计算；也可以填不同的值。"))
+    }
+
+    @Test
+    fun a_time_range_and_a_previously_entered_planned_investment_are_both_submitted() {
+        // 先填计划投入，再设时段：两个字段都保留，计划投入不会被时段长度覆盖。
+        val intents = RecordingAgendaActions()
+        mount(allDatesScreenState(), intents)
+        openAddScheduleSheet()
+
+        composeRule.onNodeWithTag("agenda-title-input", useUnmergedTree = true).performScrollTo()
+            .performTextReplacement("时段与投入")
+        composeRule.onNodeWithTag("agenda-estimate-input", useUnmergedTree = true)
+            .performTextReplacement("45")
+
+        chooseTimeWithWheel("agenda-start-time", hour = 10, minute = 0)
+        chooseTimeWithWheel("agenda-end-time", hour = 10, minute = 30)
+        submitAddSchedule()
+
+        val draft = intents.addedSchedules.single()
+        assertEquals(10 * 60, draft.startMinute)
+        assertEquals(10 * 60 + 30, draft.endMinute)
+        assertEquals(45, draft.estimatedMinutes)
+    }
+
+    @Test
+    fun the_backfill_default_follows_the_time_range_when_planned_investment_is_blank() {
+        // 事后补记没有单独的时间段，默认投入沿用领域的计划时长口径：
+        // 计划投入没填时，回退到这条日程自己的时间段长度。
+        mount(allDatesScreenState())
+        openAddScheduleSheet()
+
+        chooseTimeWithWheel("agenda-start-time", hour = 10, minute = 0)
+        chooseTimeWithWheel("agenda-end-time", hour = 10, minute = 30)
+        composeRule.onNodeWithTag("agenda-backfill-toggle", useUnmergedTree = true)
+            .performScrollTo()
+            .performSemanticsAction(SemanticsActions.OnClick)
+        composeRule.waitForIdle()
+
+        composeRule.onNodeWithTag("agenda-backfill-editor", useUnmergedTree = true)
+            .performScrollTo()
+            .assertIsDisplayed()
+        assertEquals("0", editableTextOf("agenda-backfill-hours"))
+        assertEquals("30", editableTextOf("agenda-backfill-minutes"))
     }
 
     @Test
@@ -1287,6 +1412,31 @@ class AgendaScreenTest {
      */
     private fun submitAddSchedule() {
         composeRule.onNodeWithTag("agenda-add-submit", useUnmergedTree = true)
+            .performSemanticsAction(SemanticsActions.OnClick)
+        composeRule.waitForIdle()
+    }
+
+    /** 读输入框的可编辑文本；标签文案不算在内。 */
+    private fun editableTextOf(tag: String): String =
+        composeRule.onNodeWithTag(tag, useUnmergedTree = true)
+            .fetchSemanticsNode()
+            .config
+            .getOrNull(SemanticsProperties.EditableText)
+            ?.text
+            .orEmpty()
+
+    /** 点开时间入口，在小时/分钟滚轮上选值并确定。 */
+    private fun chooseTimeWithWheel(entryTag: String, hour: Int, minute: Int) {
+        composeRule.onNodeWithTag(entryTag, useUnmergedTree = true)
+            .performScrollTo()
+            .performSemanticsAction(SemanticsActions.OnClick)
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag("agenda-time-wheel-hours", useUnmergedTree = true)
+            .performScrollToIndex(hour)
+        composeRule.onNodeWithTag("agenda-time-wheel-minutes", useUnmergedTree = true)
+            .performScrollToIndex(minute)
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag("agenda-time-wheel-confirm", useUnmergedTree = true)
             .performSemanticsAction(SemanticsActions.OnClick)
         composeRule.waitForIdle()
     }

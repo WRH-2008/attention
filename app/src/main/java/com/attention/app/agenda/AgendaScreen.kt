@@ -4,6 +4,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.snapping.rememberSnapFlingBehavior
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -11,6 +12,7 @@ import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -20,6 +22,10 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListState
+import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.shape.CircleShape
@@ -42,6 +48,7 @@ import androidx.compose.material3.Checkbox
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.ModalBottomSheet
@@ -51,6 +58,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -61,6 +69,8 @@ import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.onClick
@@ -78,6 +88,7 @@ import com.attention.app.ui.components.AttentionOutlinedButton
 import com.attention.app.ui.components.AttentionSelectedIndicator
 import com.attention.app.ui.components.AttentionTextButton
 import com.attention.app.ui.components.AttentionTouchTargetMinSize
+import com.attention.app.ui.components.attentionTouchTarget
 import com.attention.app.ui.format.DurationFormat
 import com.attention.app.ui.format.TimeEntrySourceFormat
 import com.attention.app.ui.theme.attentionTokens
@@ -1257,7 +1268,11 @@ private fun AgendaStopResultSection(
 
 /**
  * 添加日程的底部表单面板。高频的添加流程被压在这一层里：面板一打开，规划日已经填好，
- * 标题与时间段、预计投入摆在一屏，备注、提醒与关联计划收在「更多设置」后面。
+ * 标题是唯一必填的字段。时间段与计划投入各自可选：时间段只决定时间轴位置，计划投入
+ * 独立计入容量；计划投入留空时，领域会回退到完整时间段的长度。
+ *
+ * 备注、提醒与关联计划折成一行入口，避免低频字段把首屏撑长；
+ * 事后补记保留为面板内的次级入口，与主表单分开。
  *
  * 表单状态仍是页面本地状态（[AgendaScheduleForm]），提交只发一个草稿 intent；
  * 提醒时刻的绝对换算由组合根按注入的时区完成，页面因此不读系统时钟与系统时区。
@@ -1278,13 +1293,22 @@ private fun AgendaAddScheduleSheet(
 ) {
     val tokens = attentionTokens()
     val backfillForm = rememberAgendaBackfillForm()
-    LaunchedEffect(visible, backfillExpanded, form.estimate) {
-        if (visible && backfillExpanded) backfillForm.initialize(form.estimate.trim().toIntOrNull() ?: 15)
+    LaunchedEffect(visible, backfillExpanded, form.startTime, form.endTime, form.estimate) {
+        if (visible && backfillExpanded) {
+            // 补记默认值沿用领域的计划时长口径：预计时长优先，没有才回退到时间段。
+            val plannedMinutes = form.estimate.trim().toIntOrNull()
+                ?: scheduleTimeRangeMinutes(form.startTime, form.endTime)
+                ?: 15
+            backfillForm.initialize(plannedMinutes)
+        }
         if (!visible) backfillForm.reset()
     }
     if (!visible) return
     // 规划日在面板打开时就填好：默认是正在看的那一天，用户仍然可以改成别的日子。
     var planningDay by remember(initialPlanningDay) { mutableStateOf(initialPlanningDay) }
+    // 正在用滚轮选择的时间端点；null 表示没有打开滚轮。
+    var timeField by remember { mutableStateOf<AgendaTimeField?>(null) }
+    val keyboardController = LocalSoftwareKeyboardController.current
     ModalBottomSheet(
         onDismissRequest = onDismiss,
         modifier = Modifier.testTag("agenda-add-sheet"),
@@ -1298,36 +1322,140 @@ private fun AgendaAddScheduleSheet(
                 .verticalScroll(rememberScrollState())
                 .padding(horizontal = tokens.spacing.large)
                 .padding(bottom = tokens.spacing.large),
-            verticalArrangement = Arrangement.spacedBy(8.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp),
         ) {
             Text(state.addScheduleHeadingLabel, style = tokens.typography.title)
-            OutlinedTextField(
-                planningDay,
-                { planningDay = it },
-                label = { Text("规划日 YYYY-MM-DD") },
-                modifier = Modifier.fillMaxWidth().testTag("agenda-add-planning-day"),
-                singleLine = true,
+            Text(
+                "先写要做什么，时间段和计划投入可以稍后补。",
+                style = tokens.typography.caption,
+                color = tokens.colorScheme.onSurfaceVariant,
             )
+            // 规划日收成标题旁的一枚短字段：默认值已经填好，需要改日子时直接改日期。
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    "规划日",
+                    style = tokens.typography.caption,
+                    color = tokens.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.weight(1f),
+                )
+                OutlinedTextField(
+                    planningDay,
+                    { planningDay = it },
+                    placeholder = { Text("YYYY-MM-DD") },
+                    modifier = Modifier.width(172.dp).height(48.dp).testTag("agenda-add-planning-day"),
+                    singleLine = true,
+                    shape = CircleShape,
+                    textStyle = tokens.typography.body,
+                )
+            }
+            // 标题是唯一必填项：用更大的字号把它抬成面板的主输入。
             OutlinedTextField(
                 form.title,
                 form::changeTitle,
-                label = { Text("日程标题") },
+                placeholder = { Text("要做什么？") },
                 modifier = Modifier.fillMaxWidth().testTag("agenda-title-input"),
                 singleLine = true,
+                textStyle = tokens.typography.title,
+                shape = RoundedCornerShape(tokens.radius.medium),
             )
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                OutlinedTextField(form.startTime, form::changeStartTime, label = { Text("开始时间 HH:mm（可选）") }, modifier = Modifier.weight(1f).testTag("agenda-start-input"), singleLine = true)
-                OutlinedTextField(form.endTime, form::changeEndTime, label = { Text("结束时间 HH:mm（可选）") }, modifier = Modifier.weight(1f).testTag("agenda-end-input"), singleLine = true)
+            // 时间段：默认可以不设；要精确时段时点开滚轮选择，不提供手输。
+            val timeUnset = form.startTime.isBlank() && form.endTime.isBlank()
+            // 计划投入留空时，领域会回退到这个时间段长度；有值时两者各自表达。
+            val slotMinutes = scheduleTimeRangeMinutes(form.startTime, form.endTime)
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    "时间段",
+                    style = tokens.typography.caption,
+                    color = tokens.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.weight(1f),
+                )
+                FilterChip(
+                    selected = timeUnset,
+                    onClick = {
+                        form.changeStartTime("")
+                        form.changeEndTime("")
+                    },
+                    label = { Text("不设时间") },
+                    leadingIcon = selectedCheckIcon(timeUnset),
+                    modifier = Modifier.attentionTouchTarget().testTag("agenda-time-none"),
+                )
             }
-            OutlinedTextField(form.estimate, form::changeEstimate, label = { Text("预计分钟") }, modifier = Modifier.fillMaxWidth().testTag("agenda-estimate-input"), singleLine = true)
-            AttentionOutlinedButton(
-                onClick = onToggleBackfill,
-                modifier = Modifier.testTag("agenda-backfill-toggle"),
-            ) { Text(if (backfillExpanded) "收起实际投入" else "记录实际投入（可选）") }
-            if (backfillExpanded) BackfillDurationEditor(form = backfillForm)
-            // 低频字段收在「更多设置」后面：展开状态用文字说明，标签本身告诉读屏它是什么。
-            AttentionTextButton(onClick = onToggleMore, modifier = Modifier.testTag("agenda-add-more-toggle")) {
-                Text(if (moreExpanded) "收起更多设置" else "更多设置（备注、提醒与关联计划）")
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                AgendaTimeEntry(
+                    label = "开始",
+                    value = form.startTime,
+                    onClick = {
+                        keyboardController?.hide()
+                        timeField = AgendaTimeField.Start
+                    },
+                    modifier = Modifier.weight(1f).testTag("agenda-start-time"),
+                )
+                Text("→", color = tokens.colorScheme.onSurfaceVariant)
+                AgendaTimeEntry(
+                    label = "结束",
+                    value = form.endTime,
+                    onClick = {
+                        keyboardController?.hide()
+                        timeField = AgendaTimeField.End
+                    },
+                    modifier = Modifier.weight(1f).testTag("agenda-end-time"),
+                )
+            }
+            // 计划投入独立于时间段：没有时间段也能填，有固定时段时也可以填不同的值。
+            Text(
+                "计划投入",
+                style = tokens.typography.caption,
+                color = tokens.colorScheme.onSurfaceVariant,
+            )
+            FlowRow(
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                listOf(15, 30, 45, 60).forEach { minutes ->
+                    val selected = form.estimate.trim() == minutes.toString()
+                    FilterChip(
+                        selected = selected,
+                        onClick = { form.changeEstimate(minutes.toString()) },
+                        label = { Text("$minutes 分钟") },
+                        leadingIcon = selectedCheckIcon(selected),
+                        modifier = Modifier.attentionTouchTarget().testTag("agenda-estimate-preset-$minutes"),
+                    )
+                }
+                OutlinedTextField(
+                    form.estimate,
+                    form::changeEstimate,
+                    placeholder = { Text("自定义分钟") },
+                    modifier = Modifier.width(150.dp).testTag("agenda-estimate-input"),
+                    singleLine = true,
+                )
+            }
+            Text(
+                if (slotMinutes == null) {
+                    "不设时间段时，计划投入仍计入每日容量。"
+                } else {
+                    "留空时按时间段长度计算；也可以填不同的值。"
+                },
+                modifier = Modifier.testTag("agenda-estimate-hint"),
+                style = tokens.typography.caption,
+                color = tokens.colorScheme.onSurfaceVariant,
+            )
+            // 低频字段折成一行：点任一项展开同一组设置，不再单独占一行文字链接。
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                MetaToggleButton(
+                    label = "备注",
+                    onClick = onToggleMore,
+                    modifier = Modifier.testTag("agenda-add-more-toggle"),
+                )
+                MetaToggleButton(
+                    label = "提醒",
+                    onClick = onToggleMore,
+                    modifier = Modifier.testTag("agenda-add-more-reminder"),
+                )
+                MetaToggleButton(
+                    label = "关联计划",
+                    onClick = onToggleMore,
+                    modifier = Modifier.testTag("agenda-add-more-target"),
+                )
             }
             if (moreExpanded) {
                 OutlinedTextField(form.note, form::changeNote, label = { Text("备注（可选）") }, modifier = Modifier.fillMaxWidth().testTag("agenda-note-input"), singleLine = true)
@@ -1347,8 +1475,12 @@ private fun AgendaAddScheduleSheet(
                     }
                 }
             }
+            AttentionTextButton(onClick = onToggleBackfill, modifier = Modifier.testTag("agenda-backfill-toggle")) {
+                Text(if (backfillExpanded) "收起实际投入" else "记录已经发生的投入")
+            }
+            if (backfillExpanded) BackfillDurationEditor(form = backfillForm)
             form.error?.let { AttentionInlineError(message = it) }
-            AttentionButton(modifier = Modifier.testTag("agenda-add-submit"), onClick = {
+            AttentionButton(modifier = Modifier.fillMaxWidth().testTag("agenda-add-submit"), onClick = {
                 val parsedDate = runCatching { LocalDate.parse(planningDay) }.getOrNull()
                 val parsedStart = parseScheduleMinute(form.startTime)
                 val parsedEnd = parseScheduleMinute(form.endTime, allowEndOfDay = true)
@@ -1384,6 +1516,214 @@ private fun AgendaAddScheduleSheet(
                 }
             }) { Text("添加日程") }
         }
+        timeField?.let { field ->
+            AgendaTimeWheelDialog(
+                title = if (field == AgendaTimeField.Start) "选择开始时间" else "选择结束时间",
+                initialMinuteOfDay = when (field) {
+                    AgendaTimeField.Start -> initialStartMinute(form)
+                    AgendaTimeField.End -> initialEndMinute(form)
+                },
+                onDismiss = { timeField = null },
+                onConfirm = { minuteOfDay ->
+                    val value = formatMinuteOfDay(minuteOfDay)
+                    when (field) {
+                        AgendaTimeField.Start -> form.changeStartTime(value)
+                        AgendaTimeField.End -> form.changeEndTime(value)
+                    }
+                    timeField = null
+                },
+            )
+        }
+    }
+}
+
+/** 添加面板里正在用滚轮选择的时间端点。 */
+private enum class AgendaTimeField { Start, End }
+
+private val TimeWheelItemHeight = 40.dp
+private const val TimeWheelVisibleItems = 5
+private val HourWheelItems: List<String> = (0..23).map { it.toString().padStart(2, '0') }
+private val MinuteWheelItems: List<String> = (0..59).map { it.toString().padStart(2, '0') }
+
+/**
+ * 时间入口：显示当前值，点击打开滚轮。面板里不再提供任何可手填的时间输入框，
+ * 避免 HH:mm 的自由文本校验落在用户身上。
+ */
+@Composable
+private fun AgendaTimeEntry(
+    label: String,
+    value: String,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val tokens = attentionTokens()
+    val unset = value.isBlank()
+    AttentionOutlinedButton(
+        onClick = onClick,
+        modifier = modifier,
+        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+    ) {
+        Column(Modifier.weight(1f)) {
+            Text(label, style = tokens.typography.caption, color = tokens.colorScheme.onSurfaceVariant)
+            Text(
+                if (unset) "未设置" else value,
+                style = tokens.typography.body,
+                color = if (unset) tokens.colorScheme.onSurfaceVariant else tokens.colorScheme.onSurface,
+            )
+        }
+    }
+}
+
+/**
+ * 小时与分钟两列滚轮。列表带吸附行为，停下时中心行就是选中值；
+ * 上下留出两条 item 高度的内边距，第一项与最后一项也能滚到中心。
+ */
+@Composable
+private fun AgendaTimeWheelDialog(
+    title: String,
+    initialMinuteOfDay: Int,
+    onDismiss: () -> Unit,
+    onConfirm: (Int) -> Unit,
+) {
+    val tokens = attentionTokens()
+    val hourState = rememberLazyListState(
+        initialFirstVisibleItemIndex = (initialMinuteOfDay / 60).coerceIn(0, HourWheelItems.lastIndex),
+    )
+    val minuteState = rememberLazyListState(
+        initialFirstVisibleItemIndex = (initialMinuteOfDay % 60).coerceIn(0, MinuteWheelItems.lastIndex),
+    )
+    val itemHeightPx = with(LocalDensity.current) { TimeWheelItemHeight.toPx() }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        modifier = Modifier.testTag("agenda-time-wheel-dialog"),
+        title = { Text(title, style = tokens.typography.title) },
+        text = {
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                TimeWheelColumn(
+                    items = HourWheelItems,
+                    state = hourState,
+                    testTag = "agenda-time-wheel-hours",
+                    modifier = Modifier.weight(1f),
+                )
+                Text(":", style = tokens.typography.title, color = tokens.colorScheme.onSurfaceVariant)
+                TimeWheelColumn(
+                    items = MinuteWheelItems,
+                    state = minuteState,
+                    testTag = "agenda-time-wheel-minutes",
+                    modifier = Modifier.weight(1f),
+                )
+            }
+        },
+        confirmButton = {
+            AttentionTextButton(
+                onClick = {
+                    val hour = centeredWheelIndex(hourState, itemHeightPx, HourWheelItems.size)
+                    val minute = centeredWheelIndex(minuteState, itemHeightPx, MinuteWheelItems.size)
+                    onConfirm(hour * 60 + minute)
+                },
+                modifier = Modifier.testTag("agenda-time-wheel-confirm"),
+            ) { Text("确定") }
+        },
+        dismissButton = {
+            AttentionTextButton(onClick = onDismiss, modifier = Modifier.testTag("agenda-time-wheel-cancel")) {
+                Text("取消")
+            }
+        },
+    )
+}
+
+@Composable
+private fun TimeWheelColumn(
+    items: List<String>,
+    state: LazyListState,
+    testTag: String,
+    modifier: Modifier = Modifier,
+) {
+    val tokens = attentionTokens()
+    val itemHeightPx = with(LocalDensity.current) { TimeWheelItemHeight.toPx() }
+    val centeredIndex by remember(state, items.size) {
+        derivedStateOf { centeredWheelIndex(state, itemHeightPx, items.size) }
+    }
+    Box(
+        modifier = modifier.height(TimeWheelItemHeight * TimeWheelVisibleItems),
+        contentAlignment = Alignment.Center,
+    ) {
+        // 中心行用底色与描边标出；文字颜色同时变化，选中的不是只有颜色一条线索。
+        Box(
+            Modifier
+                .fillMaxWidth()
+                .height(TimeWheelItemHeight)
+                .background(tokens.colorScheme.surfaceContainerHighest, RoundedCornerShape(tokens.radius.small))
+                .border(1.dp, tokens.colorScheme.outlineVariant, RoundedCornerShape(tokens.radius.small)),
+        )
+        LazyColumn(
+            state = state,
+            modifier = Modifier.fillMaxSize().testTag(testTag),
+            contentPadding = PaddingValues(vertical = TimeWheelItemHeight * (TimeWheelVisibleItems / 2)),
+            flingBehavior = rememberSnapFlingBehavior(lazyListState = state),
+            horizontalAlignment = Alignment.CenterHorizontally,
+        ) {
+            itemsIndexed(items) { index, label ->
+                Box(
+                    Modifier.fillMaxWidth().height(TimeWheelItemHeight),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text(
+                        label,
+                        style = tokens.typography.body,
+                        color = if (index == centeredIndex) tokens.colorScheme.onSurface else tokens.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+        }
+    }
+}
+
+/** 当前停在中心的那一项。吸附停止时偏移为 0，索引就是中心行。 */
+private fun centeredWheelIndex(state: LazyListState, itemHeightPx: Float, count: Int): Int {
+    if (count == 0) return 0
+    val extra = if (state.firstVisibleItemScrollOffset > itemHeightPx / 2f) 1 else 0
+    return (state.firstVisibleItemIndex + extra).coerceIn(0, count - 1)
+}
+
+/** 打开滚轮时的起始值：优先沿用已填的值，否则从另一端推 30 分钟。 */
+private fun initialStartMinute(form: AgendaScheduleForm): Int =
+    parseScheduleMinute(form.startTime)
+        ?: parseScheduleMinute(form.endTime, allowEndOfDay = true)?.minus(30)?.coerceAtLeast(0)
+        ?: (9 * 60)
+
+private fun initialEndMinute(form: AgendaScheduleForm): Int =
+    parseScheduleMinute(form.endTime, allowEndOfDay = true)?.coerceAtMost(23 * 60 + 59)
+        ?: parseScheduleMinute(form.startTime)?.plus(30)?.coerceAtMost(23 * 60 + 59)
+        ?: (10 * 60)
+
+private fun formatMinuteOfDay(minuteOfDay: Int): String =
+    (minuteOfDay / 60).toString().padStart(2, '0') + ":" + (minuteOfDay % 60).toString().padStart(2, '0')
+
+/** 选中态除底色外再加一枚勾：状态不只靠颜色传达给读屏与色觉障碍用户。 */
+private fun selectedCheckIcon(selected: Boolean): (@Composable () -> Unit)? =
+    if (selected) {
+        { Icon(Icons.Filled.Check, contentDescription = null, modifier = Modifier.size(16.dp)) }
+    } else {
+        null
+    }
+
+/**
+ * 添加面板里的一行低频入口。三个入口都展开同一组「更多设置」：
+ * 先让它们保持同样短，字号放大时由 [FlowRow] 自动换行。
+ */
+@Composable
+private fun MetaToggleButton(
+    label: String,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    AttentionOutlinedButton(onClick = onClick, modifier = modifier) {
+        Text(label, maxLines = 1, overflow = TextOverflow.Ellipsis)
     }
 }
 
