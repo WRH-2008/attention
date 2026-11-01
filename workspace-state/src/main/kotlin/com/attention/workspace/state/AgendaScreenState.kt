@@ -573,7 +573,8 @@ private fun agendaRow(
     return AgendaScheduleRow(
         entry = entry,
         title = entry.title,
-        detailLabel = "${entry.planningDate}$time · ${entry.estimatedMinutes ?: 0} 分钟$target$reminder" +
+        // 计划时长与容量使用同一个领域口径：预计时长优先，没有时回退到完整时间段。
+        detailLabel = "${entry.planningDate}$time · ${planned ?: 0} 分钟$target$reminder" +
             if (entry.completed) " · 已完成" else "",
         note = entry.note,
         startText = start?.let(::formatAgendaMinute) ?: "",

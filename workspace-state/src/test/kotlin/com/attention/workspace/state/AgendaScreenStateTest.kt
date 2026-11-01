@@ -197,7 +197,11 @@ class AgendaScreenStateTest {
             settings = StoredSettings(dailyCapacityMinutes = 120),
         )
 
-        assertEquals("已安排 30 / 120 分钟", project(state = state).dateSections.single().capacityLabel)
+        val section = project(state = state).dateSections.single()
+
+        assertEquals("已安排 30 / 120 分钟", section.capacityLabel)
+        // 详情行与容量使用同一个计划时长口径，不会把只有时间段的条目显示成 0 分钟。
+        assertTrue(section.timelineRows.single().detailLabel.contains(" · 30 分钟"))
     }
 
     @Test
