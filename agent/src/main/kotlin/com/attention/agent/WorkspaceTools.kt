@@ -19,6 +19,7 @@ import java.time.ZoneId
 import java.time.format.DateTimeParseException
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonObjectBuilder
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
@@ -77,7 +78,7 @@ class WorkspaceTools(private val source: WorkspaceSource) {
 
     private fun agendaTool() = object : AgentTool {
         override val name = "query_agenda"
-        override val description = "查询某个规划日的日程：时间轴、未安排时间分组与当日容量占用"
+        override val description = "查询某个规划日的日程：时间轴、未安排时间分组与每日容量占用"
         override val parametersSchema = buildJsonObject {
             put("type", "object")
             putJsonObject("properties") {
@@ -114,13 +115,15 @@ class WorkspaceTools(private val source: WorkspaceSource) {
             putJsonObject("properties") {
                 putJsonObject("cadence") {
                     put("type", "string")
-                    put("description", "周期类型：DAILY/WEEKLY/MONTHLY/ONE_TIME")
+                    put("description", "周期类型：$CADENCE_CHOICES")
                 }
                 putJsonObject("date") {
                     put("type", "string")
                     put("description", "周期内任意一天，YYYY-MM-DD；缺省为今天")
                 }
             }
+            // 必填契约写进 schema：下一阶段 LLM 按它生成参数，漏标就会漏参
+            putJsonArray("required") { add(JsonPrimitive("cadence")) }
         }
 
         override fun execute(args: JsonObject): JsonObject {
@@ -204,8 +207,13 @@ class WorkspaceTools(private val source: WorkspaceSource) {
 
     private fun cadenceArg(args: JsonObject): GoalCadence {
         val raw = args["cadence"]?.jsonPrimitive?.content
-            ?: throw IllegalArgumentException("cadence 必填：DAILY/WEEKLY/MONTHLY/ONE_TIME")
+            ?: throw IllegalArgumentException("cadence 必填：$CADENCE_CHOICES")
         return GoalCadence.entries.firstOrNull { it.name == raw }
-            ?: throw IllegalArgumentException("cadence 必须是 DAILY/WEEKLY/MONTHLY/ONE_TIME，实际「$raw」")
+            ?: throw IllegalArgumentException("cadence 必须是 $CADENCE_CHOICES，实际「$raw」")
+    }
+
+    private companion object {
+        /** 周期取值的单一事实来源：schema 描述与两处报错共用，永不与 [GoalCadence] 漂移。 */
+        val CADENCE_CHOICES = GoalCadence.entries.joinToString("/") { it.name }
     }
 }

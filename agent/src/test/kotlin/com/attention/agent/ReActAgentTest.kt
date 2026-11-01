@@ -24,7 +24,7 @@ class ReActAgentTest {
 
     @Test
     fun first_step_answer_ends_the_loop_without_any_tool_call() = runTest {
-        val reasoner = FakeReasoner(ReasonerDecision.Answer.of("直接答复"))
+        val reasoner = FakeReasoner(ReasonerDecision.Answer.withoutThought("直接答复"))
         val tool = RecordingTool()
 
         val outcome = agent(reasoner, tool).run("现在几点")

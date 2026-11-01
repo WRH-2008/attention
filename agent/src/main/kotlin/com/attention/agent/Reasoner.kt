@@ -18,7 +18,8 @@ sealed class ReasonerDecision {
     /** 结束循环并给出最终答复；[thought] 可为空——有时答复本身不需要前置思考。 */
     data class Answer(val thought: String?, val text: String) : ReasonerDecision() {
         companion object {
-            fun of(text: String): Answer = Answer(thought = null, text = text)
+            /** 不写前置思考、直接给出答复：调用点一眼可见这里不会有思考事件。 */
+            fun withoutThought(text: String): Answer = Answer(thought = null, text = text)
         }
     }
 }

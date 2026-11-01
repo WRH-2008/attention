@@ -183,6 +183,17 @@ class WorkspaceToolsTest {
     }
 
     @Test
+    fun query_period_stats_declares_cadence_required_in_its_schema() {
+        val schema = toolNamed("query_period_stats").parametersSchema
+
+        // schema 是执行契约的镜像：execute 对 cadence 缺失抛异常，schema 就必须标注必填
+        assertEquals(
+            listOf("cadence"),
+            schema["required"]!!.jsonArray.map { it.jsonPrimitive.content },
+        )
+    }
+
+    @Test
     fun all_four_tools_register_with_distinct_names_and_schemas() {
         val tools = tools()
 
